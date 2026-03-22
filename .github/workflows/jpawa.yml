@@ -1,0 +1,113 @@
+name: JP Dump and Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      force_url:
+        description: 'Direct CDN URL (skips scraping if provided)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  dump-jp-update:
+    environment: "GitHub Action"
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13.x'
+
+      - name: Install Python Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Get Tools
+        run: python getTools.py
+
+      - name: Get APK
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.force_url }}" ]; then
+            python getAndroidGameData.py --client jp --url "${{ github.event.inputs.force_url }}"
+          else
+            python getAndroidGameData.py --client jp
+          fi
+
+      - name: Run Dumper
+        run: python getJPVersion.py --sql-cipher-url ${{ secrets.SQL_FETCH_URL }}
+
+      - name: Get Version Info
+        id: get_version
+        shell: bash
+        run: |
+          game_version=$(jq -r '.GameVersion' jp_data/metadata.json 2>/dev/null || echo "unknown")
+          addressable_build=$(jq -r '.AddressableBuildVersion' jp_data/metadata.json 2>/dev/null || echo "unknown")
+          full_version="${game_version}_${addressable_build}"
+          tag_name="jp_${full_version}"
+          
+          echo "game_version=$game_version" >> $GITHUB_OUTPUT
+          echo "addressable_build=$addressable_build" >> $GITHUB_OUTPUT
+          echo "full_version=$full_version" >> $GITHUB_OUTPUT
+          echo "tag_name=$tag_name" >> $GITHUB_OUTPUT
+          
+          echo "Game Version: $game_version"
+          echo "Addressable Build: $addressable_build"
+          echo "Tag Name: $tag_name"
+
+      - name: Prepare Release Artifacts
+        id: prepare_artifacts
+        shell: bash
+        run: |
+          # Create release directory
+          mkdir -p release_assets
+          
+          # Zip jp_data folder
+          zip -r release_assets/jp_data.zip jp_data/
+          
+          # Copy APK and XAPK files if they exist
+          if ls *.apk 1>/dev/null 2>&1; then
+            cp *.apk release_assets/
+          fi
+          if ls *.xapk 1>/dev/null 2>&1; then
+            cp *.xapk release_assets/
+          fi
+          
+          # List assets
+          echo "Release assets:"
+          ls -la release_assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.get_version.outputs.tag_name }}
+          name: "JP Update - ${{ steps.get_version.outputs.full_version }}"
+          body: |
+            ## JP Client Update
+            
+            **Game Version:** ${{ steps.get_version.outputs.game_version }}
+            **Addressable Build Version:** ${{ steps.get_version.outputs.addressable_build }}
+            
+            ### Included Files
+            - `jp_data.zip` - Complete dump data (config, dlls, il2cpp.cs, fbs files, etc.)
+            - APK/XAPK files if available
+            
+            ### Metadata
+            ```json
+            ${{ toJson(fromJson(steps.get_version.outputs.metadata)) }}
